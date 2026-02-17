@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>편하게좀 하자2</title>
+  <style>
+    body { margin:20px; background:#111; color:#eee; font-family:Arial,sans-serif; text-align:center; }
+    h2 { color:#0af; }
+    #container { position:relative; display:inline-block; border:2px solid #444; border-radius:8px; overflow:hidden; background:#000; }
+    video { display:block; max-width:100%; height:auto; }
+    #roi-box { position:absolute; border:2px solid #ff4444; background:rgba(255,68,68,0.12); pointer-events:none; z-index:3; box-sizing:border-box; }
+    .marker-img { position:absolute; pointer-events:none; z-index:5; opacity:0.85; border:2px solid #0f0; }
+    #info { margin:20px 0; font-size:1.3em; font-weight:bold; min-height:4em; color:#ffeb3b; white-space:pre-wrap; }
+    button { padding:12px 28px; margin:10px 4px; font-size:1.2em; cursor:pointer; border:none; border-radius:8px; background:#246; color:white; }
+    button:hover { background:#468; }
+    button:disabled { background:#444; cursor:not-allowed; }
+    .reset-btn { background:#c62828; }
+    .reset-btn:hover { background:#e53935; }
+  </style>
+</head>
+<body>
+<h2>편하게좀 하자 v2</h2>
+<button id="startBtn" onclick="start()">창/화면 공유 시작</button>
+<button onclick="stop()">중지</button>
+<button class="reset-btn" onclick="resetAll()">초기화</button>
+<br><br>
+<div id="container">
+  <video id="vid" autoplay playsinline muted></video>
+  <div id="roi-box"></div>
+</div>
+<div id="info">로딩중 (약 5~30초 소요)</div>
+<script async src="https://docs.opencv.org/4.5.5/opencv.js"></script>
+<script>
+// 전역 변수
+let realCv = null;
+let templates = [];
+let found = [];
+let running = false;
+let stream = null;
+let videoElement = null;
+const TH = 0.85;
+const ROI_X = 460;
+const ROI_Y = 335;
+const ROI_W = 360;
+const ROI_H = 445;
+const templateUrls = [
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/새.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/해.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/복.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/많.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/이.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/받.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/으.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/세.PNG',
+  'https://raw.githubusercontent.com/wedrwedr/TR/refs/heads/main/요.PNG'
+];
+// OpenCV 초기화
+async function initOpenCV() {
+  document.getElementById('info').textContent = 'OpenCV.js 초기화 대기 중...';
+  if (typeof cv === 'undefined') {
+    document.getElementById('info').textContent = 'opencv.js 로드 실패 (네트워크 확인)';
+    return;
+  }
+  try {
+    if (cv instanceof Promise) {
+      realCv = await cv;
+    } else {
+      realCv = cv;
+    }
+    if (!realCv || typeof realCv.imread !== 'function') {
+      throw new Error('OpenCV 초기화 실패 - cv.imread 없음');
+    }
+    document.getElementById('info').textContent = '사진 정보 로딩 중...';
+    await loadTemplates();
+  } catch (err) {
+    console.error('OpenCV 초기화 오류:', err);
+    document.getElementById('info').textContent = 'OpenCV 초기화 실패: ' + err.message;
+  }
+}
+async function loadTemplates() {
+  templates = [];
+  found = Array(templateUrls.length).fill(false);
+  for (let i = 0; i < templateUrls.length; i++) {
+    try {
+      const url = templateUrls[i];
+      const img = await new Promise((res, rej) => {
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.onload = () => res(image);
+        image.onerror = () => rej(new Error(url + ' 로드 실패'));
+        image.src = url;
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      let mat = realCv.imread(canvas);
+      realCv.cvtColor(mat, mat, realCv.COLOR_RGBA2GRAY);
+      templates.push({
+        mat,
+        url,
+        width: img.width,
+        height: img.height,
+        name: url.split('/').pop().replace('.PNG', '')
+      });
+      document.getElementById('info').textContent = `사진 로드 중... (${i+1}/${templateUrls.length})`;
+    } catch (err) {
+      console.warn(`사진 ${i+1} 실패:`, err);
+    }
+  }
+  const loadedCount = templates.length;
+  document.getElementById('info').textContent = loadedCount > 0
+    ? `사진 ${loadedCount}개 로드 완료! 시작 버튼을 눌러주세요`
+    : '사진 로드 전부 실패 (네트워크 또는 CORS 문제)';
+  document.getElementById('startBtn').disabled = loadedCount === 0;
+}
+async function start() {
+  if (running) return;
+  if (templates.length === 0 || !realCv) {
+    alert('사진 로드와 OpenCV 초기화가 완료되어야 시작할 수 있습니다.');
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { cursor: 'always' }
+    });
+    videoElement = document.getElementById('vid');
+    videoElement.srcObject = stream;
+    videoElement.onloadedmetadata = () => {
+      running = true;
+      updateRoiBox();
+      document.getElementById('info').textContent = '화면 공유 시작';
+      loop();
+    };
+  } catch (err) {
+    document.getElementById('info').textContent = '화면 공유 실패: ' + err.message;
+    console.error(err);
+  }
+}
+function stop() {
+  running = false;
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+  if (videoElement) {
+    videoElement.srcObject = null;
+  }
+  document.getElementById('roi-box').style.display = 'none';
+  document.querySelectorAll('.marker-img').forEach(el => el.remove());
+  document.getElementById('info').textContent = '중지됨 (화면 공유 종료)';
+}
+function resetAll() {
+  document.getElementById('roi-box').style.display = 'none';
+  document.querySelectorAll('.marker-img').forEach(el => el.remove());
+  found = Array(templateUrls.length).fill(false);
+  document.getElementById('info').textContent = '초기화 완료';
+}
+function updateRoiBox() {
+  if (!running) return;
+  const vid = document.getElementById('vid');
+  const cont = document.getElementById('container');
+  const roiBox = document.getElementById('roi-box');
+  if (vid.videoWidth === 0 || vid.videoHeight === 0) {
+    requestAnimationFrame(updateRoiBox);
+    return;
+  }
+  const scaleX = cont.clientWidth / vid.videoWidth;
+  const scaleY = cont.clientHeight / vid.videoHeight;
+  roiBox.style.left = (ROI_X * scaleX) + 'px';
+  roiBox.style.top = (ROI_Y * scaleY) + 'px';
+  roiBox.style.width = (ROI_W * scaleX) + 'px';
+  roiBox.style.height = (ROI_H * scaleY) + 'px';
+  roiBox.style.display = 'block';
+  document.querySelectorAll('.marker-img').forEach(img => {
+    const x = parseFloat(img.dataset.absX) * scaleX;
+    const y = parseFloat(img.dataset.absY) * scaleY;
+    const w = parseFloat(img.dataset.origW) * scaleX;
+    const h = parseFloat(img.dataset.origH) * scaleY;
+    img.style.left = x + 'px';
+    img.style.top = y + 'px';
+    img.style.width = w + 'px';
+    img.style.height = h + 'px';
+  });
+  requestAnimationFrame(updateRoiBox);
+}
+function loop() {
+  if (!running) return;
+  const vid = document.getElementById('vid');
+  if (vid.videoWidth === 0) {
+    setTimeout(loop, 500);
+    return;
+  }
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = vid.videoWidth;
+  tempCanvas.height = vid.videoHeight;
+  const ctx = tempCanvas.getContext('2d');
+  ctx.drawImage(vid, 0, 0);
+  let src = realCv.imread(tempCanvas);
+  let roiRect = new realCv.Rect(ROI_X, ROI_Y, ROI_W, ROI_H);
+  if (ROI_X + ROI_W > src.cols || ROI_Y + ROI_H > src.rows) {
+    document.getElementById('info').textContent = 'ROI가 화면 크기를 초과했습니다';
+    src.delete();
+    setTimeout(loop, 2000);
+    return;
+  }
+  let roi = src.roi(roiRect);
+  let gray = new realCv.Mat();
+  realCv.cvtColor(roi, gray, realCv.COLOR_RGBA2GRAY);
+  let infoLines = [];
+  let newlyFound = false;
+
+  // 후보 목록 수집
+  let candidates = [];
+
+  for (let i = 0; i < templates.length; i++) {
+    if (found[i]) continue;
+    let templ = templates[i].mat;
+    let result = new realCv.Mat();
+    realCv.matchTemplate(gray, templ, result, realCv.TM_CCOEFF_NORMED);
+    const {maxVal, maxLoc} = realCv.minMaxLoc(result);
+    if (maxVal >= TH) {
+      candidates.push({
+        index: i,
+        val: maxVal,
+        loc: {x: maxLoc.x, y: maxLoc.y},
+        name: templates[i].name
+      });
+    }
+    result.delete();
+  }
+
+  // 후보들 중 가까운 위치(예: 50px 이내) 중 최고 점수만 선택 (NMS-like)
+  let selected = [];
+  candidates.sort((a, b) => b.val - a.val);  // 점수 높은 순 정렬
+
+  for (let cand of candidates) {
+    let isOverlapped = false;
+    for (let sel of selected) {
+      const dx = Math.abs(cand.loc.x - sel.loc.x);
+      const dy = Math.abs(cand.loc.y - sel.loc.y);
+      if (dx < 50 && dy < 50) {  // 50px 이내이면 중복으로 간주 (조정 가능)
+        isOverlapped = true;
+        break;
+      }
+    }
+    if (!isOverlapped) {
+      selected.push(cand);
+    }
+  }
+
+  // 선택된 후보들만 표시
+  for (let sel of selected) {
+    const i = sel.index;
+    const absX = ROI_X + sel.loc.x;
+    const absY = ROI_Y + sel.loc.y;
+    const marker = document.createElement('img');
+    marker.src = templates[i].url;
+    marker.className = 'marker-img';
+    marker.dataset.absX = absX;
+    marker.dataset.absY = absY;
+    marker.dataset.origW = templates[i].width;
+    marker.dataset.origH = templates[i].height;
+    document.getElementById('container').appendChild(marker);
+    found[i] = true;
+    newlyFound = true;
+    infoLines.push(`[${templates[i].name}] 발견! 위치: (${Math.round(absX)}, ${Math.round(absY)}) 일치도: ${(sel.val*100).toFixed(1)}%`);
+  }
+
+  if (newlyFound) {
+    document.getElementById('info').innerHTML = infoLines.join('\n');
+  }
+  src.delete();
+  roi.delete();
+  gray.delete();
+  setTimeout(loop, 500);
+}
+// 페이지 로드 시 초기화 시작
+window.addEventListener('load', () => {
+  setTimeout(initOpenCV, 800);
+});
+</script>
+</body>
+</html>
